@@ -6,101 +6,70 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const WIDTH = 800;
-const HEIGHT = 480;
+const HEIGHT = 440;
 
 const renderer = new ChartJSNodeCanvas({
   width: WIDTH,
   height: HEIGHT,
   backgroundColour: '#ffffff',
-  plugins: {
-    modern: ['chartjs-plugin-annotation']
+  chartCallback: (ChartJS) => {
+    ChartJS.defaults.font.family = 'sans-serif';
   }
 });
 
-function getCommuteColor(rainPct) {
-  if (rainPct >= 70) return 'rgba(226,75,74,0.75)';
-  if (rainPct >= 40) return 'rgba(239,159,39,0.70)';
+function getRainColor(v) {
+  if (v >= 70) return 'rgba(226,75,74,0.75)';
+  if (v >= 40) return 'rgba(239,159,39,0.70)';
   return 'rgba(93,202,165,0.60)';
 }
 
-function buildConfig(data, dateLabel) {
-  const { slots, minTemp, maxTemp, morningCommute, eveningCommute } = data;
-
-  const labels = slots.map(s => s.label);
-  const temps  = slots.map(s => Math.round(s.temp * 10) / 10);
-  const rains  = slots.map(s => Math.round(s.pop * 100));
-
-  const pointColors = slots.map(s =>
-    s.isCommute && s.pop >= 0.4 ? '#E24B4A' : '#378ADD'
-  );
-
-  const barColors = rains.map(v =>
-    v >= 70 ? 'rgba(226,75,74,0.75)' :
-    v >= 40 ? 'rgba(239,159,39,0.70)' :
-              'rgba(93,202,165,0.60)'
-  );
-
-  // Commute zone annotation boxes
-  const morningIdx = slots.reduce((acc, s, i) => s.isMorningCommute ? [...acc, i] : acc, []);
-  const eveningIdx = slots.reduce((acc, s, i) => s.isEveningCommute ? [...acc, i] : acc, []);
-
-  const annotations = {};
-
-  if (morningIdx.length) {
-    annotations.morningZone = {
-      type: 'box',
-      xMin: morningIdx[0] - 0.5,
-      xMax: morningIdx[morningIdx.length - 1] + 0.5,
-      backgroundColor: 'rgba(55,138,221,0.07)',
-      borderColor: 'rgba(55,138,221,0.25)',
-      borderWidth: 1,
-      borderDash: [4, 4],
-      label: {
-        display: true,
-        content: '→ office',
-        position: { x: 'start', y: 'start' },
-        font: { size: 10, family: 'sans-serif' },
-        color: '#888780',
-        padding: 4
-      }
+function parseOWM(list, timezone) {
+  const slots = list.map(item => {
+    const localHour = new Date((item.dt + timezone) * 1000).getUTCHours();
+    return {
+      label: String(localHour).padStart(2, '0') + 'h',
+      temp: Math.round(item.main.temp * 10) / 10,
+      pop: Math.round((item.pop || 0) * 100),
+      desc: item.weather[0].description,
+      localHour,
+      isMorning: localHour >= 6 && localHour <= 9,
+      isEvening: localHour >= 15 && localHour <= 18
     };
-  }
+  });
+  const temps = slots.map(s => s.temp);
+  const minTemp = Math.round(Math.min(...temps));
+  const maxTemp = Math.round(Math.max(...temps));
+  const avg = arr => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
+  const morningPop = avg(slots.filter(s => s.isMorning).map(s => s.pop));
+  const eveningPop = avg(slots.filter(s => s.isEvening).map(s => s.pop));
+  const morningDesc = slots.find(s => s.isMorning)?.desc || 'clear';
+  const eveningDesc = slots.find(s => s.isEvening)?.desc || 'clear';
+  return { slots, minTemp, maxTemp, morningPop, eveningPop, morningDesc, eveningDesc };
+}
 
-  if (eveningIdx.length) {
-    annotations.eveningZone = {
-      type: 'box',
-      xMin: eveningIdx[0] - 0.5,
-      xMax: eveningIdx[eveningIdx.length - 1] + 0.5,
-      backgroundColor: 'rgba(55,138,221,0.07)',
-      borderColor: 'rgba(55,138,221,0.25)',
-      borderWidth: 1,
-      borderDash: [4, 4],
-      label: {
-        display: true,
-        content: '← home',
-        position: { x: 'start', y: 'start' },
-        font: { size: 10, family: 'sans-serif' },
-        color: '#888780',
-        padding: 4
-      }
-    };
-  }
-
-  return {
+async function renderChart(list, city) {
+  const timezone = city?.timezone || 3600;
+  const { slots, minTemp, maxTemp, morningPop, eveningPop, morningDesc, eveningDesc } = parseOWM(list, timezone);
+  const today = new Date().toLocaleDateString('de-DE', {
+    weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Berlin'
+  });
+  const morningStr = morningPop > 20 ? 'rain ' + morningPop + '%' : morningDesc;
+  const eveningStr = eveningPop > 20 ? 'rain ' + eveningPop + '%' : eveningDesc;
+  const subtitle = minTemp + 'deg - ' + maxTemp + 'degC   |   to office: ' + morningStr + '   |   back home: ' + eveningStr;
+  const config = {
     type: 'bar',
     data: {
-      labels,
+      labels: slots.map(s => s.label),
       datasets: [
         {
           type: 'line',
-          label: 'Temp °C',
-          data: temps,
+          label: 'Temp C',
+          data: slots.map(s => s.temp),
           borderColor: '#378ADD',
           backgroundColor: 'rgba(55,138,221,0.08)',
           borderWidth: 2.5,
           pointRadius: 4,
-          pointBackgroundColor: pointColors,
-          pointBorderColor: pointColors,
+          pointBackgroundColor: slots.map(s => (s.isMorning || s.isEvening) && s.pop >= 40 ? '#E24B4A' : '#378ADD'),
           fill: true,
           tension: 0.4,
           yAxisID: 'yTemp',
@@ -109,8 +78,8 @@ function buildConfig(data, dateLabel) {
         {
           type: 'bar',
           label: 'Rain %',
-          data: rains,
-          backgroundColor: barColors,
+          data: slots.map(s => s.pop),
+          backgroundColor: slots.map(s => getRainColor(s.pop)),
           borderRadius: 4,
           yAxisID: 'yRain',
           order: 2
@@ -120,121 +89,65 @@ function buildConfig(data, dateLabel) {
     options: {
       responsive: false,
       animation: false,
-      layout: { padding: { top: 48, right: 60, bottom: 20, left: 20 } },
+      layout: { padding: { top: 56, right: 64, bottom: 24, left: 24 } },
       plugins: {
         legend: { display: false },
         title: {
           display: true,
-          text: [
-            dateLabel,
-            `${Math.round(minTemp)}°C – ${Math.round(maxTemp)}°C  ·  morning: ${morningCommute.desc} ${morningCommute.pop > 20 ? '🌧 ' + morningCommute.pop + '%' : ''}  ·  evening: ${eveningCommute.desc} ${eveningCommute.pop > 20 ? '🌧 ' + eveningCommute.pop + '%' : ''}`
-          ],
+          text: [today + '  Munich', subtitle],
           color: '#3d3d3a',
-          font: [
-            { size: 15, weight: '500', family: 'sans-serif' },
-            { size: 11, weight: 'normal', family: 'sans-serif' }
-          ],
-          padding: { bottom: 12 }
-        },
-        annotation: { annotations }
+          font: { size: 14, family: 'sans-serif' },
+          padding: { bottom: 16 }
+        }
       },
       scales: {
         x: {
           grid: { color: 'rgba(0,0,0,0.05)' },
-          ticks: { color: '#73726c', font: { size: 11, family: 'sans-serif' }, autoSkip: false },
-          border: { display: false }
+          ticks: { color: '#73726c', font: { size: 11 } }
         },
         yTemp: {
           position: 'left',
           grid: { color: 'rgba(0,0,0,0.05)' },
-          ticks: {
-            color: '#3d3d3a',
-            font: { size: 11, family: 'sans-serif' },
-            callback: v => Math.round(v) + '°'
-          },
-          border: { display: false }
+          ticks: { color: '#3d3d3a', font: { size: 11 }, callback: v => Math.round(v) + 'deg' }
         },
         yRain: {
           position: 'right',
           min: 0,
           max: 100,
           grid: { display: false },
-          ticks: {
-            color: '#5DCAA5',
-            font: { size: 11, family: 'sans-serif' },
-            callback: v => v + '%',
-            stepSize: 25
-          },
-          border: { display: false }
+          ticks: { color: '#5DCAA5', font: { size: 11 }, callback: v => v + '%', stepSize: 25 }
         }
       }
-    }
+    },
+    plugins: [{
+      id: 'commuteZones',
+      beforeDraw(chart) {
+        const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+        if (!x) return;
+        const bw = x.getPixelForValue(1) - x.getPixelForValue(0);
+        slots.forEach((s, i) => {
+          if (!s.isMorning && !s.isEvening) return;
+          const cx = x.getPixelForValue(i);
+          ctx.save();
+          ctx.fillStyle = 'rgba(55,138,221,0.07)';
+          ctx.fillRect(cx - bw / 2, top, bw, bottom - top);
+          ctx.restore();
+        });
+      }
+    }]
   };
+  return renderer.renderToBuffer(config);
 }
 
-function parseOWMData(owmList, timezone = 3600) {
-  const slots = owmList.map(item => {
-    const utcHour = new Date((item.dt + timezone) * 1000).getUTCHours();
-    return {
-      label: utcHour.toString().padStart(2, '0') + 'h',
-      temp: item.main.temp,
-      pop: item.pop || 0,
-      desc: item.weather[0].description,
-      utcHour,
-      isCommute: (utcHour >= 6 && utcHour <= 9) || (utcHour >= 15 && utcHour <= 18),
-      isMorningCommute: utcHour >= 6 && utcHour <= 9,
-      isEveningCommute: utcHour >= 15 && utcHour <= 18
-    };
-  });
-
-  const allTemps = slots.map(s => s.temp);
-  const minTemp = Math.min(...allTemps);
-  const maxTemp = Math.max(...allTemps);
-
-  const morningSlots = slots.filter(s => s.isMorningCommute);
-  const eveningSlots = slots.filter(s => s.isEveningCommute);
-
-  const avgPop = arr => arr.length
-    ? Math.round(arr.reduce((a, b) => a + b.pop, 0) / arr.length * 100)
-    : 0;
-
-  const morningDesc = morningSlots[0]?.desc || 'clear';
-  const eveningDesc = eveningSlots[0]?.desc || 'clear';
-
-  return {
-    slots,
-    minTemp,
-    maxTemp,
-    morningCommute: { pop: avgPop(morningSlots), desc: morningDesc },
-    eveningCommute: { pop: avgPop(eveningSlots), desc: eveningDesc }
-  };
-}
-
-// GET /chart?apikey=OWM_KEY
-// or POST /chart with body { list: [...], city: {...} }
 app.get('/chart', async (req, res) => {
   try {
     const apiKey = req.query.apikey || process.env.OWM_API_KEY;
     if (!apiKey) return res.status(400).json({ error: 'Missing OWM API key' });
-
-    const url = `https://api.openweathermap.org/data/2.5/forecast?q=Munich,de&appid=${apiKey}&units=metric&cnt=8`;
+    const url = 'https://api.openweathermap.org/data/2.5/forecast?q=Munich,de&appid=' + apiKey + '&units=metric&cnt=8';
     const r = await fetch(url);
     const json = await r.json();
-
     if (!json.list) return res.status(500).json({ error: 'Bad OWM response', detail: json });
-
-    const timezone = json.city.timezone;
-    const data = parseOWMData(json.list, timezone);
-
-    const today = new Date();
-    const dateLabel = today.toLocaleDateString('de-DE', {
-      weekday: 'long', day: 'numeric', month: 'long',
-      timeZone: 'Europe/Berlin'
-    }) + ' · Munich';
-
-    const config = buildConfig(data, dateLabel);
-    const buffer = await renderer.renderToBuffer(config);
-
+    const buffer = await renderChart(json.list, json.city);
     res.set('Content-Type', 'image/png');
     res.send(buffer);
   } catch (err) {
@@ -243,24 +156,11 @@ app.get('/chart', async (req, res) => {
   }
 });
 
-// POST /chart — accepts pre-fetched OWM data (used by n8n to avoid double fetch)
 app.post('/chart', async (req, res) => {
   try {
     const { list, city } = req.body;
-    if (!list) return res.status(400).json({ error: 'Missing list in body' });
-
-    const timezone = city?.timezone || 3600;
-    const data = parseOWMData(list, timezone);
-
-    const today = new Date();
-    const dateLabel = today.toLocaleDateString('de-DE', {
-      weekday: 'long', day: 'numeric', month: 'long',
-      timeZone: 'Europe/Berlin'
-    }) + ' · Munich';
-
-    const config = buildConfig(data, dateLabel);
-    const buffer = await renderer.renderToBuffer(config);
-
+    if (!list) return res.status(400).json({ error: 'Missing list' });
+    const buffer = await renderChart(list, city);
     res.set('Content-Type', 'image/png');
     res.send(buffer);
   } catch (err) {
@@ -271,4 +171,4 @@ app.post('/chart', async (req, res) => {
 
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
-app.listen(PORT, () => console.log(`Weather chart service running on port ${PORT}`));
+app.listen(PORT, () => console.log('Weather chart service on port ' + PORT));
